@@ -417,6 +417,28 @@ HTML_PAGE = """<!DOCTYPE html>
       to { stroke-dashoffset: 0; }
     }
 
+    /* Dust Haze & Drifting PM Particles */
+    #dustHaze {
+      transition: opacity 0.6s ease;
+    }
+    #dustLayer {
+      transition: opacity 0.6s ease;
+    }
+    .dust-dot {
+      animation: dustDrift var(--dust-dur, 4.5s) linear infinite;
+    }
+    .dust-dot.d2 { animation-delay: -1.1s; }
+    .dust-dot.d3 { animation-delay: -2.2s; }
+    .dust-dot.d4 { animation-delay: -3.3s; }
+    .dust-dot.d5 { animation-delay: -0.6s; }
+    @keyframes dustDrift {
+      0%   { transform: translate(0px, 0px); opacity: 0; }
+      15%  { opacity: 0.9; }
+      50%  { transform: translate(110px, -10px); opacity: 0.85; }
+      85%  { opacity: 0.7; }
+      100% { transform: translate(220px, 6px); opacity: 0; }
+    }
+
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
@@ -563,13 +585,45 @@ HTML_PAGE = """<!DOCTYPE html>
 
       <div class="tunnel-viewport">
         <svg class="tunnel-svg" viewBox="0 0 800 170" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="dustGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#d97706" stop-opacity="0.15" />
+              <stop offset="50%" stop-color="#f59e0b" stop-opacity="0.55" />
+              <stop offset="100%" stop-color="#b45309" stop-opacity="0.35" />
+            </linearGradient>
+          </defs>
           <!-- Tunnel ceiling & floor -->
           <rect x="0" y="0" width="800" height="22" fill="#1e293b" />
           <rect x="0" y="142" width="800" height="28" fill="#1e293b" />
+          <!-- Dust haze overlay (opacity scales with PM2.5 / PM10) -->
+          <rect id="dustHaze" x="0" y="22" width="800" height="120" fill="url(#dustGrad)" opacity="0" />
           <line x1="0" y1="22" x2="800" y2="22" stroke="#334155" stroke-width="2" />
           <line x1="0" y1="142" x2="800" y2="142" stroke="#475569" stroke-width="2" />
           <!-- Dashed road center line -->
           <line x1="120" y1="156" x2="780" y2="156" stroke="#f59e0b" stroke-width="2" stroke-dasharray="16 14" opacity="0.55" />
+
+          <!-- Floating / Blowing Dust Particles (PM2.5 fine + PM10 coarse) -->
+          <g id="dustLayer" opacity="0" fill="#fbbf24">
+            <circle class="dust-dot" cx="140" cy="42" r="2.2" />
+            <circle class="dust-dot d2" cx="195" cy="78" r="3.4" />
+            <circle class="dust-dot d3" cx="230" cy="118" r="2.5" />
+            <circle class="dust-dot d4" cx="275" cy="54" r="3.8" />
+            <circle class="dust-dot d5" cx="315" cy="96" r="2.0" />
+            <circle class="dust-dot" cx="360" cy="40" r="3.2" />
+            <circle class="dust-dot d2" cx="405" cy="126" r="2.8" />
+            <circle class="dust-dot d3" cx="445" cy="72" r="4.0" />
+            <circle class="dust-dot d4" cx="490" cy="108" r="2.4" />
+            <circle class="dust-dot d5" cx="535" cy="48" r="3.5" />
+            <circle class="dust-dot" cx="575" cy="88" r="2.6" />
+            <circle class="dust-dot d2" cx="615" cy="122" r="3.2" />
+            <circle class="dust-dot d3" cx="165" cy="104" r="1.8" />
+            <circle class="dust-dot d4" cx="255" cy="84" r="2.2" />
+            <circle class="dust-dot d5" cx="345" cy="66" r="1.9" />
+            <circle class="dust-dot" cx="430" cy="46" r="2.5" />
+            <circle class="dust-dot d2" cx="515" cy="94" r="3.0" />
+            <circle class="dust-dot d3" cx="595" cy="60" r="2.1" />
+          </g>
+          <text id="dustAlertLabel" x="400" y="38" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="800" opacity="0">HIGH DUST LEVEL — CLEARING TUNNEL</text>
 
           <!-- NFC Checkpoint Arch -->
           <rect x="650" y="22" width="12" height="120" fill="#334155" />
@@ -826,6 +880,29 @@ HTML_PAGE = """<!DOCTYPE html>
           document.getElementById("airflowGroup").setAttribute("opacity", d.fan_duty >= 80 ? "0.95" : "0.45");
         }
         document.getElementById("svgFanLabel").textContent = `FAN ${d.fan_duty}%`;
+
+        // Update dust haze & particle animation based on PM levels
+        const pm25Ratio = d.pm25 !== null && d.pm25_threshold > 0 ? d.pm25 / d.pm25_threshold : 0;
+        const pm10Ratio = d.pm10 !== null && d.pm10_threshold > 0 ? d.pm10 / d.pm10_threshold : 0;
+        const dustLevel = Math.max(0, Math.min(1.5, Math.max(pm25Ratio, pm10Ratio)));
+        const dustLayer = document.getElementById("dustLayer");
+        const dustHaze = document.getElementById("dustHaze");
+        const dustAlertLabel = document.getElementById("dustAlertLabel");
+
+        if (dustLevel <= 0.25) {
+          dustLayer.setAttribute("opacity", "0");
+          dustHaze.setAttribute("opacity", "0");
+          dustAlertLabel.setAttribute("opacity", "0");
+        } else {
+          const particleOpacity = Math.min(1.0, (dustLevel - 0.2) * 0.95);
+          const hazeOpacity = Math.min(0.65, (dustLevel - 0.25) * 0.55);
+          dustLayer.setAttribute("opacity", particleOpacity.toFixed(2));
+          dustLayer.setAttribute("fill", d.pm_high ? "#fb923c" : "#cbd5e1");
+          dustHaze.setAttribute("opacity", hazeOpacity.toFixed(2));
+          dustAlertLabel.setAttribute("opacity", d.pm_high ? "0.95" : "0");
+          const dustDur = Math.max(1.1, 5.2 - (d.fan_duty / 100) * 3.8);
+          rootStyle.setProperty("--dust-dur", dustDur.toFixed(2) + "s");
+        }
 
         // PM values
         const pm25El = document.getElementById("pm25");
