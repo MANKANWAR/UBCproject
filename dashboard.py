@@ -60,20 +60,21 @@ class SimulatedAirSensor:
 
 
 class SimulatedNFC:
-    def __init__(self):
-        self._last = 0.0
+    def __init__(self, hold_seconds=NFC_HOLD_SECONDS):
+        self._hold_seconds = hold_seconds
+        self._last_detected = 0.0
         self._uid = ["0x04", "0xa2", "0x3f", "0x19"]
 
     def start(self):
         pass
 
     def trigger(self):
-        self._last = time.monotonic()
+        self._last_detected = time.monotonic()
 
     def is_active(self):
-        if self._last == 0.0:
+        if self._last_detected == 0.0:
             return False, None
-        return (time.monotonic() - self._last) <= NFC_HOLD_SECONDS, self._uid
+        return (time.monotonic() - self._last_detected) <= self._hold_seconds, self._uid
 
     def stop(self):
         pass
@@ -89,6 +90,7 @@ class SystemController:
         self.manual_duty = DEFAULT_DUTY
         self.pm25_threshold = DEFAULT_PM25_THRESHOLD
         self.pm10_threshold = DEFAULT_PM10_THRESHOLD
+        self.nfc_hold_seconds = NFC_HOLD_SECONDS
 
         self.pm25 = None
         self.pm10 = None
@@ -96,7 +98,6 @@ class SystemController:
         self.nfc_uid = None
         self.nfc_remaining = 0.0
         self._test_nfc_until = 0.0
-        self._last_hw_nfc_seen = 0.0
 
         self.fan_duty = DEFAULT_DUTY
         self.fan_rpm = 0.0
@@ -110,7 +111,7 @@ class SystemController:
         if simulate:
             self.fan = SimulatedFan(initial_duty=DEFAULT_DUTY)
             self.air = SimulatedAirSensor()
-            self.nfc = SimulatedNFC()
+            self.nfc = SimulatedNFC(hold_seconds=self.nfc_hold_seconds)
             self.hw_status = {"fan": "SIM", "air": "SIM", "nfc": "SIM"}
         else:
             from main import AirQualitySensor, FanController, NFCMonitor
@@ -129,7 +130,7 @@ class SystemController:
                 self.hw_status["air"] = f"ERR: {e}"
 
             try:
-                self.nfc = NFCMonitor()
+                self.nfc = NFCMonitor(hold_seconds=self.nfc_hold_seconds)
                 self.nfc.start()
             except Exception as e:
                 print(f"[WARN] NFC init failed: {e}")
@@ -141,9 +142,16 @@ class SystemController:
     def trigger_test_nfc(self):
         now = time.monotonic()
         with self._lock:
-            self._test_nfc_until = now + NFC_HOLD_SECONDS
+            self._test_nfc_until = now + self.nfc_hold_seconds
         if self.simulate and self.nfc is not None:
             self.nfc.trigger()
+
+    def set_nfc_hold(self, hold_seconds):
+        val = max(1.0, min(600.0, round(float(hold_seconds), 1)))
+        with self._lock:
+            self.nfc_hold_seconds = val
+        if self.nfc is not None and hasattr(self.nfc, "_hold_seconds"):
+            self.nfc._hold_seconds = val
 
     def set_thresholds(self, pm25_threshold=None, pm10_threshold=None):
         with self._lock:
@@ -165,8 +173,12 @@ class SystemController:
                 pm25, pm10 = self.air.get_readings()
 
             hw_nfc_active, uid = (False, None)
+            hw_remaining = 0.0
             if self.nfc is not None:
                 hw_nfc_active, uid = self.nfc.is_active()
+                last_det = getattr(self.nfc, "_last_detected", 0.0)
+                if hw_nfc_active and last_det > 0.0:
+                    hw_remaining = max(0.0, self.nfc_hold_seconds - (now - last_det))
 
             with self._lock:
                 mode = self.mode
@@ -175,14 +187,6 @@ class SystemController:
                 pm10_thresh = self.pm10_threshold
                 test_remaining = max(0.0, self._test_nfc_until - now)
 
-            if hw_nfc_active:
-                self._last_hw_nfc_seen = now
-
-            hw_remaining = (
-                max(0.0, NFC_HOLD_SECONDS - (now - self._last_hw_nfc_seen))
-                if hw_nfc_active
-                else 0.0
-            )
             nfc_active = hw_nfc_active or (test_remaining > 0.0)
             nfc_remaining = max(hw_remaining, test_remaining)
             if nfc_active and uid is None:
@@ -255,7 +259,7 @@ class SystemController:
                 "nfc_active": self.nfc_active,
                 "nfc_uid": self.nfc_uid,
                 "nfc_remaining": self.nfc_remaining,
-                "nfc_hold_seconds": NFC_HOLD_SECONDS,
+                "nfc_hold_seconds": self.nfc_hold_seconds,
                 "fan_duty": self.fan_duty,
                 "fan_rpm": round(self.fan_rpm),
                 "mode": self.mode,
@@ -683,6 +687,20 @@ HTML_PAGE = """<!DOCTYPE html>
           </g>
         </svg>
       </div>
+
+      <div class="threshold-box" style="margin-top: 12px; padding-top: 12px;">
+        <div class="threshold-row" style="flex-wrap: wrap;">
+          <label for="nfcHoldInput" style="min-width: 175px;">NFC Active Duration (sec)</label>
+          <div class="threshold-inputs" style="max-width: 360px;">
+            <input type="range" id="nfcHoldSlider" min="1" max="120" step="1" value="10" />
+            <input type="number" id="nfcHoldInput" min="1" max="600" step="1" value="10" />
+          </div>
+          <div class="btn-row" style="align-items: center;">
+            <button class="primary" onclick="saveNfcHold()">Apply Duration</button>
+            <span class="save-msg" id="nfcHoldMsg"></span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="grid">
@@ -787,6 +805,11 @@ HTML_PAGE = """<!DOCTYPE html>
     pm10Slider.addEventListener("input", () => pm10Input.value = pm10Slider.value);
     pm10Input.addEventListener("input", () => pm10Slider.value = pm10Input.value);
 
+    const nfcHoldSlider = document.getElementById("nfcHoldSlider");
+    const nfcHoldInput = document.getElementById("nfcHoldInput");
+    nfcHoldSlider.addEventListener("input", () => nfcHoldInput.value = nfcHoldSlider.value);
+    nfcHoldInput.addEventListener("input", () => nfcHoldSlider.value = nfcHoldInput.value);
+
     async function postFan(payload) {
       await fetch("/api/fan", {
         method: "POST",
@@ -802,6 +825,22 @@ HTML_PAGE = """<!DOCTYPE html>
 
     async function simNfc() {
       await fetch("/api/sim-nfc", { method: "POST" });
+      poll();
+    }
+
+    async function saveNfcHold() {
+      const nfc_hold_seconds = parseFloat(nfcHoldInput.value);
+      if (isNaN(nfc_hold_seconds) || nfc_hold_seconds < 1) {
+        return;
+      }
+      await fetch("/api/nfc-hold", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nfc_hold_seconds }),
+      });
+      const msg = document.getElementById("nfcHoldMsg");
+      msg.textContent = "Saved!";
+      setTimeout(() => { msg.textContent = ""; }, 2000);
       poll();
     }
 
@@ -836,6 +875,8 @@ HTML_PAGE = """<!DOCTYPE html>
           pm25Slider.value = d.pm25_threshold;
           pm10Input.value = d.pm10_threshold;
           pm10Slider.value = d.pm10_threshold;
+          nfcHoldInput.value = d.nfc_hold_seconds;
+          nfcHoldSlider.value = d.nfc_hold_seconds;
           threshInitialized = true;
         }
         document.getElementById("pm25LimitText").textContent = d.pm25_threshold;
@@ -1002,6 +1043,10 @@ def make_handler(controller):
                     pm25_threshold=payload.get("pm25_threshold"),
                     pm10_threshold=payload.get("pm10_threshold"),
                 )
+                self._send_json(controller.get_status())
+            elif self.path == "/api/nfc-hold":
+                if payload.get("nfc_hold_seconds") is not None:
+                    controller.set_nfc_hold(payload.get("nfc_hold_seconds"))
                 self._send_json(controller.get_status())
             elif self.path == "/api/sim-nfc":
                 controller.trigger_test_nfc()
